@@ -1,5 +1,8 @@
-/*  Steve - Aug 7 - add pull up resistor on pin 27
+/*  
+
+Aug 28 - Move debounce code to replace previous read for input_pin_value and add more debug code. Add ratcheting code to handle potential negative time deltas.
 Aug 19 - removed initial program - just a pin tester, check IO
+Aug 7 - add pull up resistor on pin 27 - Steve
 
 # SMS additions by Steve
 AA block - first attempt at SMS on set up loop
@@ -120,10 +123,33 @@ void setup() {
   // adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
   // adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_0);
 
-  input_pin_value = digitalRead(INPUT_PIN);
+  // Read without a debounce:
+  // input_pin_value = digitalRead(INPUT_PIN);
+
+  // Arduino code to read from inputPin X times and debounce by taking the majority reading from X readings with a 50ms delay in between each read.
+  int totalReading = 0;   // start with no count
+  int NUM_READS = 5;      // count five times, should always be an odd number.
+
+  for (int cnt = 0; cnt < NUM_READS; cnt++) {
+      totalReading += digitalRead(INPUT_PIN); // Accumulate readings from the input pin
+      delay(50); // Delay for a bit between each read.
+  }
+
+  if (totalReading * 2 > NUM_READS) {   // go through NUM_READS readings and select most prominent (common)
+      // Majority of readings are HIGH
+      input_pin_value = HIGH;
+  } else {
+      // Majority of readings are LOW
+      input_pin_value = LOW;
+  }
 
   Serial.println("  Current input pin value: " + String(input_pin_value));
   
+  if (totalReading > 0 && totalReading < NUM_READS) {
+      // If we have a mix of readings, then note it in the log so that we know the debounce code did something
+      Serial.println("   Mixed readings detected -- debouncing code worked! Total readings: " + String(totalReading) + " out of " + String(NUM_READS));
+  }
+
   // Check the wakeup reason
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
@@ -145,26 +171,6 @@ void setup() {
       // If it's waking up from deep sleep due to our SMS send timer going off, then send a text message (to a configured number) with the the previous day's cumulative water usage time. If the message is sent successfully, then clear the cumulative amount and go back to sleep for another 24 hrs.
       doSendSMS();
   }
-
-//Aug 20 - first attempt at debounce
-// Arduino code to read from inputPin X times and debounce by taking the majority reading from X readings with a 50ms delay in between each read.
-int totalReading = 0;   // start with no count
-int NUM_READS = 5;      // count five times, increased to ten x Aug 21
-
-for (int cnt = 0; cnt < NUM_READS; cnt++) {
-    totalReading += digitalRead(INPUT_PIN); // Accumulate readings from the input pin
-    delay(500); // Sleep for 500ms to exaggerate effect
-}
-
-if (totalReading * 2 > NUM_READS) {   // go through five readings and select most prominent (common)
-    // Majority of readings are HIGH
-    // Do something
-} else {
-    // Majority of readings are LOW
-    // Do something else
-}
-//aug 20 end
-
 
   // No matter how we woke up, always go back to sleep at the end.
   doDeepSleep();
@@ -275,6 +281,14 @@ void doLogFallingEdge() {
       Serial.println("  No rising edge time logged -- invalid reading (noise in the line, or switch triggered too quickly?)");
     } else {
       int64_t time_diff_s = (tv.tv_sec - last_rising_edge_time_s);
+
+      //  Check for negative time differences (noise in the line, or switch triggered too quickly?)
+      if (time_diff_s < 0) {
+        Serial.println("  Negative time difference detected -- invalid reading (noise in the line, or switch triggered too quickly?)");
+        Serial.println("  Time difference: " + String(time_diff_s) + " seconds");
+        // Set the time difference to zero to "ratchet" so that we can't actually count downwards.
+        time_diff_s = 0;
+      }
 
       total_water_usage_time_s += time_diff_s;
 
