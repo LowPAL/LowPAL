@@ -1,5 +1,11 @@
+// LowPAL - Low-power Pump Activity Logger
+// Copyright 2024 Clint Herron and Stephen Peacock
+// MIT License
+
 #define DEST_PHONE_NUMBER "+19876543210" // Update phone numbers here.  Clint's cell # 19876543210.  Steve's is +12345678900
-#define SMS_TARGET "+19876543210"        // Secondary phone
+// TODO: Add support for multiple phone numbers
+// TODO: Possibly read phone number from file saved to SDCard?
+
 /*
 
 Sep 20 - Fixed Clint's bug w/ "+=" vs "+"
@@ -46,6 +52,37 @@ On startup, check the wakeup reason.
 * DoDeepSleep()
   * Calculate the amount of time remaining until our target SMS send time (10pm)
   * Set wake conditions of the device to be either the target SMS send time or a rising edge on the water sensor input pin -- whichever comes first.
+
+## Ongoing Tasks / Problems
+
+Problem: How to configure the devices at runtime for their configuration (update schedule, or even which cell phone number to text to, since we may not want to do international texting depending on the cell plan of the SIM cards that we purchase).
+Possible solution: These devices have an SD Card slot on them. We could compile the application with a default configuration, but we could also support plugging in an SD card that has a small text file with configuration parameters (local SMS target number, GPS on/off, temp/humidity on/off, send frequency, etc) and on first-time boot, the device can check to see if an SD card is present, and read the text file from the SD card (if it's present) and override the default parameters if needed.
+
+Task: Need to add support for logging temperature / humidity data on regular intervals
+
+Task: Need to add support for waking up at regular intervals to log extra data (temp/humidity) as well as send SMS on regular intervals (at least daily, but possibly hourly or even faster for debug purposes).
+
+Task: Need to build the IoT message receiver to collect SMS messages and collate data.
+
+Task: Integrate with WhatsApp for business if possible.
+
+Task: Would be good to have a unique QR code printed on each device that will let people scan it and view a webpage with usage data for this particular pump, as well as send feedback / report problems / ask questions about it.
+
+Task: Need to add support for GPS data logging and sending.
+
+Task: Need to add support for battery voltage monitoring and sending.
+
+Task: Need to add support for solar panel voltage monitoring and sending.
+
+Task: Need to add support for solar panel current monitoring and sending.
+
+Task: Audit power consumption of the device and see if we can reduce it further.
+
+Task: Audit time / profile functions and ensure that we don't have unnecessary sleeps or delays in the code.
+
+Cleanup: Clean up debug prints and ensure that we have a good logging system in place.
+
+Task: Save detailed log information to SD card (if present) -- part of above task to improve the logging system overall.
 
 */
 
@@ -188,11 +225,12 @@ void setup()
     // If it's waking up from deep sleep due to our SMS send timer going off, then send a text message (to a configured number) with the the previous day's cumulative water usage time. If the message is sent successfully, then clear the cumulative amount and go back to sleep for another 24 hrs.
     doSendSMS();
   }
+  // TODO: Even if we woke up for a rising edge, we should still check to see if it's time to send an SMS.
+  // TODO: Add support to log other sensors on our regular wakeup timer check. I.E., log humidity / temperature / tower signal quality every 30 - 60 minutes, but only package up data and send as an SMS once per day.
 
   // No matter how we woke up, always go back to sleep at the end.
   doDeepSleep();
 }
-
 
 void printLocalTime(){
   struct timeval tv;
@@ -201,35 +239,13 @@ void printLocalTime(){
   struct tm timeinfo;
   localtime_r(&now, &timeinfo);
 
+  Serial.print(">> Current system time: ");
   Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
-  Serial.print("Day of week: ");
-  Serial.println(&timeinfo, "%A");
-  Serial.print("Month: ");
-  Serial.println(&timeinfo, "%B");
-  Serial.print("Day of Month: ");
-  Serial.println(&timeinfo, "%d");
-  Serial.print("Year: ");
-  Serial.println(&timeinfo, "%Y");
-  Serial.print("Hour: ");
-  Serial.println(&timeinfo, "%H");
-  Serial.print("Hour (12 hour format): ");
-  Serial.println(&timeinfo, "%I");
-  Serial.print("Minute: ");
-  Serial.println(&timeinfo, "%M");
-  Serial.print("Second: ");
-  Serial.println(&timeinfo, "%S");
-
-  Serial.println("Time variables");
-  char timeHour[3];
-  strftime(timeHour,3, "%H", &timeinfo);
-  Serial.println(timeHour);
-  char timeWeekDay[10];
-  strftime(timeWeekDay,10, "%A", &timeinfo);
-  Serial.println(timeWeekDay);
   Serial.println();
 }
 
 // AT+CLTS Get Local Timestamp
+// NOTE: Not sure if needed, but may add it later if AT+CCLK? is not sufficient.
 /*
 int8_t getLocalTimestampUTC() {
   modem.sendAT("+CLTS?");
@@ -302,7 +318,8 @@ int8_t setLocalTimeFromCCLK() {
     return 0;
   }
 
-  // TODO: How to use timezone information?
+  // TODO: How to properly use timezone information? 
+  //  NOTE: May not be needed if we deal primarily in local time. Important thing is to send SMS messages at 10pm local, so if UTC is not set correctly, that's probably fine.
   // TODO: How to populate timeinfo.tm_isdst properly?
   //  NOTE: Most developing countries do not use DST, so we can default to 0 for now.
 
@@ -318,28 +335,30 @@ int8_t setLocalTimeFromCCLK() {
   return res;
 }
 
+// TODO: Many of the modem functions are growing large enough that we can probably break them out into a supplementary source file soon, so that they don't continue to clutter up the rest of the program flow.
 void doFirstTimeInitialization()
 {
   Serial.println("doFirstTimeInitialization()");
-  printLocalTime();
+  printLocalTime(); // NOTE: This should print an uninitialized time (1970) until we set the time from the cell tower.
   
-  //delay(1000);
-  // TODO: Ensure that we can communicate with the cell modem, and that it can connect with the tower
-  // TODO: If it can connect with the tower, then set the internal RTC according to the cell tower's information so that we have correct local time.
-  // TODO: Send an SMS with a "powered on" message including our MAC address, GPS, battery voltage, etc.
+  //delay(1000); // TODO: Unneeded?
+  // Ensure that we can communicate with the cell modem, and that it can connect with the tower
+  // If it can connect with the tower, then set the internal RTC according to the cell tower's information so that we have correct local time.
+  // Send an SMS with a "powered on" message including our GPS (if available), battery voltage, tower information, etc.
 
   Serial.println("Powering on cell modem...");
 
-  // This section starts the cell antenna
-  pinMode(PWR_PIN, OUTPUT);    //  Set power pin to output needed to START modem on power pin 4
+  // Start the cell antenna
+  pinMode(PWR_PIN, OUTPUT);    // Set power pin to output needed to START modem on power pin 4
   digitalWrite(PWR_PIN, HIGH); // Set power pin high (on)
   delay(300);
-  digitalWrite(PWR_PIN, LOW); //  Not sure why it gets toggled off?
+  digitalWrite(PWR_PIN, LOW);  // Not sure why it gets toggled off, but all documentation says to do this routine for powerup.
 
-  SerialAT.begin(UART_BAUD, SERIAL_8N1, PIN_RX, PIN_TX); // Set conditions for serial port to read and write (it can accept AT commands from PC)
+  SerialAT.begin(UART_BAUD, SERIAL_8N1, PIN_RX, PIN_TX); // Set conditions for serial port to read and write
 
   Serial.println("Enabling SMS message indications.");
 
+  // TODO: Is +CNMI= needed? It seems like this might be already being sent by the restart code that happens later.
   modem.sendAT("+CNMI=1,2,0,0,0"); //    Enable new SMS message indications.  Buffer / storage or not?
   if (SerialAT.available())
   { // Listen for incoming SMS messages
@@ -347,6 +366,8 @@ void doFirstTimeInitialization()
     Serial.println("Response: " + sms);
   }
 
+  // There are two ways to initialize the modem -- restart, or simple init.
+  //  
   if (true) {
     Serial.println("Initializing modem via restart..."); // Start modem on next line
     if (!modem.restart())
@@ -366,6 +387,7 @@ void doFirstTimeInitialization()
   }
 
   // RF antenna should be started by now
+
   Serial.println("Println: Your boot count start number is: " + String(bootCount));
 
   // Texts to send on initialization loop:
@@ -379,12 +401,13 @@ void doFirstTimeInitialization()
   }
 
   // This section checks battery level.  See page 58 of SIM manual.  Output from CBC is (battery charging on or off 0,1,2),(perceantgge capacity),(voltage in mV)
+  // NOTE: This does not work if plugged into USB power, so need to connect to (unpowered) FTDI serial port monitor to actually test this.
+  // TODO: Probably should wrap this in its own function at some point.
   modem.sendAT("+CBC");                              //    Check battery level.  This line sends the AT request to modem
   String battLoop = modem.stream.readStringUntil('\n');
-  battLoop.replace("\r", "");
-  battLoop.replace("\n", ""); //  This helps strip out confusing character formatting
+  battLoop.trim();
   modem.waitResponse();
-  Serial.println("Batt Volt = " + String(battLoop)); // This prints string to serial port
+  Serial.println("Batt Volt = '" + String(battLoop) + "'");
 
   modem.sendSMS(DEST_PHONE_NUMBER, String("Battery level: charge status,capacity,voltage: " + battLoop)); // send cell tower strength to text
   if (modem.waitResponse(10000L) != 1)
@@ -396,47 +419,44 @@ void doFirstTimeInitialization()
   // This section checks cell tower info
   String res = modem.getIMEI();
   Serial.print("IMEI:");
-  Serial.println(res); // Called "res" for "result"
+  Serial.println(res);
   Serial.println();
 
   modem.sendAT("+CPSI?"); //  test cell provider info
   if (modem.waitResponse("+CPSI: ") == 1)
   {
     res = modem.stream.readStringUntil('\n');
-    res.replace("\r", "");
-    res.replace("\n", ""); //  This helps strip out confusing character formatting
+    res.trim();
     modem.waitResponse();
-    Serial.print("The current network parameters are:");
-    Serial.println(res);
+    Serial.println(">> The current network parameters are: '" + res + "'");
   } else {
-    Serial.println("No network parameters found");
+    Serial.println(">> No network parameters found");
   }
 
   Serial.println("Sending network parameters via SMS...");
   // Send tower info
-  if (!modem.sendSMS(SMS_TARGET, String(res)))
+  if (!modem.sendSMS(DEST_PHONE_NUMBER, String(res)))
   {
     DBG("Network parameter send failed");
   }
   // End tower info section
 
-  // Second SMS_TARGET, just as an example of second SMS number to call.  Useful for Africa contact, plus US contact?  Maybe third phone added too?
-  //modem.sendSMS(SMS_TARGET, String("Second cell number listed +1(574)329-0975")); // send SMS
-  //if (modem.waitResponse(10000L) != 1)
-  //{ // wait 15 seconds for tower ping
-  //  DBG("Counter send failed");
-  //}
-  //  End second phone number section
   Serial.println("\n---Getting Signal Quality---\n");
 
-  // This section is a second way to get minimal tower strength
+  // Read tower signal strength
   int csq = modem.getSignalQuality();
-  Serial.println("Signal quality: " + String(csq));
+  if (csq == 99) {
+    Serial.println(">> Failed to get signal quality");
+    csq = 0;
+  }
+  // getSignalQuality returns 99 if it fails, or 0-31 if it succeeds, so we check for failure and map return values to percentage from 0-100.
+  csq = map(csq, 0, 31, 0, 100);
+  Serial.println("Signal quality: " + String(csq) + "%");
 
-  modem.sendSMS(SMS_TARGET, String(" Your signal strength: " + String(csq)));
+  modem.sendSMS(DEST_PHONE_NUMBER, String(" SMS: Your signal strength: " + String(csq) + "%"));
   if (modem.waitResponse(10000L) != 1)
   { // wait 10 seconds for tower ping
-    DBG("Counter send failed");
+    DBG("Signal strength send failed");
   }
   //   End tower signal strength section
 
@@ -450,6 +470,7 @@ void doFirstTimeInitialization()
 //  End timestamp and cell tower strength section
 
 #if TINY_GSM_TEST_GPS
+  // TODO: This section loops endlessly if we don't have a GPS antenna connected. Need to add a timeout // fallback.
   Serial.println("\n---Starting GPS TEST---\n");
   // Set Modem GPS Power Control Pin to HIGH ,turn on GPS power
   // Only in version 20200415 is there a function to control GPS power
@@ -488,8 +509,8 @@ void doFirstTimeInitialization()
   }
 
   //  Send GPS info to SMS target
-  modem.sendSMS(SMS_TARGET, String(" Lat " + String(+lat))); //  Send latitude to text, but more than two decimal places?
-  modem.sendSMS(SMS_TARGET, String(" Lon " + String(+lon))); //  Send longitude to text, but more than two decimal places?
+  modem.sendSMS(DEST_PHONE_NUMBER, String(" Lat " + String(+lat))); //  Send latitude to text, but more than two decimal places?
+  modem.sendSMS(DEST_PHONE_NUMBER, String(" Lon " + String(+lon))); //  Send longitude to text, but more than two decimal places?
   if (modem.waitResponse(10000L) != 1)
   {
     DBG("Lat fail");
@@ -498,11 +519,13 @@ void doFirstTimeInitialization()
   Serial.println("\n---End of GPRS TEST---\n");
 #endif // TINY_GSM_TEST_GPS
 
-
+  // TODO: Needed delay?
   delay(1000); // delay 1 second before powering antenna down
 
   //  This section powers down RF (cell) antenna
   SerialAT.println("AT+CPOWD=1"); // see page 83
+
+  // TODO: Needed delay?
   delay(1000);
   while (SerialAT.available())
   {
@@ -524,9 +547,7 @@ void doLogRisingEdge()
   struct tm timeinfo;
   localtime_r(&now, &timeinfo);
 
-  last_rising_edge_time_s = tv.tv_sec; // line changed here to remove "+"rfkl
-  //  Last_rising_edge_time_s = last_rising_edge_time_s + tv.tv_sec;
-  //  Was: last_rising_edge_time_s += tv.tv_sec; but was changed by Tom
+  last_rising_edge_time_s = tv.tv_sec;
 
   Serial.println("  Rising edge detected at " + String(timeinfo.tm_hour) + ":" + String(timeinfo.tm_min) + ":" + String(timeinfo.tm_sec));
 }
@@ -543,7 +564,7 @@ void doLogFallingEdge()
 
   if (last_rising_edge_time_s == 0)
   { //  only zero if falling edge
-    Serial.println("  No rising edge time logged -- invalid reading (noise in the line, or switch triggered too quickly?)");
+    Serial.println(">>> WARNING: No rising edge time logged! Invalid reading (noise in the line, or switch triggered too quickly?)");
   }
   else
   {
@@ -557,7 +578,7 @@ void doLogFallingEdge()
     //  Check for negative time differences (noise in the line, or switch triggered too quickly?)
     if (time_diff_s < 0)
     {
-      Serial.println("  Negative time difference detected -- invalid reading (noise in the line, or switch triggered too quickly?)");
+      Serial.println(">>> WARNING: Negative time difference detected -- invalid reading (noise in the line, or switch triggered too quickly?)");
       Serial.println("  Time difference: " + String(time_diff_s) + " seconds");
       // Set the time difference to zero to "ratchet" so that we can't actually count downwards.
       time_diff_s = 0;
@@ -584,7 +605,10 @@ void doSendSMS()
   struct tm timeinfo;
   localtime_r(&now, &timeinfo);
 
-  // Send the SMS
+  // TODO: Power up the modem (take it out of airplane / low-power mode, or whatever's needed)
+
+  // TODO: Send the SMS
+
   Serial.println("  Sending SMS with water usage time: " + String(total_water_usage_time_s) + " seconds");
   Serial.println("  SMS sent at " + String(timeinfo.tm_hour) + ":" + String(timeinfo.tm_min) + ":" + String(timeinfo.tm_sec));
 
@@ -602,6 +626,8 @@ void doSendSMS()
   {
     Serial.println("SMS failed to send");
   }
+
+  // TODO: Power down the modem, or put it back into low-power mode
 }
 
 // This function takes care of all housekeeping needed to go to deep sleep and save our battery.
@@ -626,6 +652,9 @@ void doDeepSleep()
   int seconds_until_sms_send = 60 - timeinfo.tm_sec;
   int total_seconds_until_sms_send = hours_until_sms_send * 3600 + minutes_until_sms_send * 60 + seconds_until_sms_send;
 
+  // TODO: I don't think that this time delta is being calculated correctly just yet. Needs moar work!
+  //  NOTE: Not sure if we want to add the full flexibility of CRON-style configuration, but that might be good to approximate for configuring the frequency of sensor readings and SMS updates. Perhaps even function pointers with their call frequency defined at the top of the program?
+
   // NOTE: This will not be correct until we set the time correctly in doFirstTimeInitialization()
   //  For more info, see: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/system_time.html
   Serial.println("  Current time of day: " + String(timeinfo.tm_hour) + ":" + String(timeinfo.tm_min) + ":" + String(timeinfo.tm_sec));
@@ -646,15 +675,15 @@ void doDeepSleep()
   // Configure the deep sleep wakeup
   esp_sleep_enable_ext0_wakeup(INPUT_PIN_GPIO, triggerOnEdge);
 
-  // Aug 21 edit out
   //  Configure the deep sleep timer
+  // TODO: Re-enable this line when we get timer-based wakeup working.
   // esp_sleep_enable_timer_wakeup(total_seconds_until_sms_send * 1000000);
 
   // Log some information for debugging purposes:
   Serial.println("  Total water usage time: " + String(total_water_usage_time_s) + " seconds");
 
   // Go to sleep
-  Serial.println("  Aug 24 Going to sleep now for but not enable_timer_wakeup now " + String(hours_until_sms_send) + ":" + String(minutes_until_sms_send) + ":" + String(seconds_until_sms_send));
+  Serial.println("  Going to sleep now " + String(hours_until_sms_send) + ":" + String(minutes_until_sms_send) + ":" + String(seconds_until_sms_send) + " until next wake up");
   esp_deep_sleep_start();
 }
 
